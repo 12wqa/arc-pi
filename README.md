@@ -24,6 +24,7 @@ pi -e /path/to/arc-pi
 /arc recommend       # show suggested settings for the current model
 /arc 35%             # set refresh threshold and show current-model recommendation
 /arc threshold 35%   # same as above; refreshes now if current context is already over threshold
+/arc upper 20%       # warn again 20% beyond the refresh threshold (default)
 /arc auto            # enable threshold detection/advisory at turn_end
 /arc manual          # disable automatic refresh; keep /arc now
 /arc hydrate auto    # auto-submit the packet in the new session (default)
@@ -52,11 +53,12 @@ ARC A ▰▰▰▱▱▱▱▱ 14k/40k
 - `M` = manual-only mode
 - filled blocks = current context progress toward the ARC refresh target
 - `!` appears when the configured threshold has been crossed
+- `!!` appears when the upper/imminent limit has been crossed
 - `↻N` appears during post-refresh cooldown turns
 
 ## How it works
 
-The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, ARC drafts `/arc-rollover threshold` in the editor, writes `~/.pi/agent/arc/trigger.json`, and notifies you to press Enter. Pi currently exposes session replacement (`ctx.newSession`) only to command handlers, not passive event hooks, so event-driven detection cannot directly switch sessions by itself. Explicit command paths such as `/arc check`, `/arc now`, or `/arc threshold 35%` can refresh immediately. The rollover then:
+The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, ARC drafts `/arc-rollover threshold` in the editor, writes `~/.pi/agent/arc/trigger.json`, and notifies you to press Enter. If you delete that draft and keep working, ARC will not nag every turn; it escalates only after the upper limit is crossed. By default `/arc upper 20%` means the imminent warning happens 20% beyond the refresh threshold (for example, 35% refresh threshold -> 42% upper limit). Pi currently exposes session replacement (`ctx.newSession`) only to command handlers, not passive event hooks, so event-driven detection cannot directly switch sessions by itself. Explicit command paths such as `/arc check`, `/arc now`, or `/arc threshold 35%` can refresh immediately. The rollover then:
 
 1. waits for Pi to be idle;
 2. builds a deterministic restart packet from recent non-system session messages;

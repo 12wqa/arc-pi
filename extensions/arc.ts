@@ -28,6 +28,7 @@ const CONTINUITY_FILE_NAMES = ["si.md", "tl.md"];
 const DEFAULTS = {
 	mode: "practical" as ArcMode,
 	threshold: 0.35,
+	upperMargin: 0.20,
 	practicalWindowTokens: 200_000,
 	maxRecentMessages: 20,
 	replenishLines: 1_200,
@@ -40,10 +41,12 @@ const DEFAULTS = {
 
 type ArcMode = "off" | "practical" | "full";
 type HydrationMode = "auto" | "draft";
+type ArcAdvisoryLevel = "threshold" | "upper";
 
 type ArcState = {
 	mode: ArcMode;
 	threshold: number;
+	upperMargin: number;
 	practicalWindowTokens: number;
 	maxRecentMessages: number;
 	replenishLines: number;
@@ -55,6 +58,7 @@ type ArcState = {
 	cooldownRemaining: number;
 	manualPending: boolean;
 	thresholdPending: boolean;
+	upperPending: boolean;
 	lastObservedTokens: number | null;
 	lastPacketPath?: string;
 	lastRolloverAt?: string;
@@ -112,6 +116,7 @@ function freshState(): ArcState {
 		cooldownRemaining: 0,
 		manualPending: false,
 		thresholdPending: false,
+		upperPending: false,
 		lastObservedTokens: null,
 	};
 }
@@ -122,6 +127,7 @@ function sanitizeState(input: unknown): ArcState | null {
 	const state = freshState();
 	if (raw.mode === "off" || raw.mode === "practical" || raw.mode === "full") state.mode = raw.mode;
 	if (typeof raw.threshold === "number" && raw.threshold > 0 && raw.threshold <= 1) state.threshold = raw.threshold;
+	if (typeof raw.upperMargin === "number" && raw.upperMargin > 0 && raw.upperMargin <= 1) state.upperMargin = raw.upperMargin;
 	if (typeof raw.practicalWindowTokens === "number" && raw.practicalWindowTokens > 0) {
 		state.practicalWindowTokens = Math.floor(raw.practicalWindowTokens);
 	}
@@ -145,6 +151,7 @@ function sanitizeState(input: unknown): ArcState | null {
 	}
 	if (typeof raw.manualPending === "boolean") state.manualPending = raw.manualPending;
 	if (typeof raw.thresholdPending === "boolean") state.thresholdPending = raw.thresholdPending;
+	if (typeof raw.upperPending === "boolean") state.upperPending = raw.upperPending;
 	if (typeof raw.lastObservedTokens === "number" || raw.lastObservedTokens === null) {
 		state.lastObservedTokens = raw.lastObservedTokens;
 	}
@@ -184,6 +191,19 @@ function effectiveWindow(state: ArcState, modelContextWindow?: number): number |
 	if (state.mode === "full") return full;
 	if (full) return Math.min(full, state.practicalWindowTokens);
 	return state.practicalWindowTokens;
+}
+
+function upperThresholdTokens(state: ArcState, thresholdTokens: number | null, window: number | null): number | null {
+	if (!thresholdTokens) return null;
+	const upper = Math.floor(thresholdTokens * (1 + state.upperMargin));
+	return window ? Math.min(window, upper) : upper;
+}
+
+function pendingText(state: ArcState): string {
+	if (state.manualPending) return "manual";
+	if (state.upperPending) return "upper";
+	if (state.thresholdPending) return "threshold";
+	return "none";
 }
 
 function modelField(model: unknown, field: string): unknown {
@@ -439,6 +459,7 @@ function renderPacket(input: RestartPacketInput): string {
 		`cwd: ${input.cwd}`,
 		`platform: ${input.platform}`,
 		`arc_threshold: ${pct(input.threshold)}`,
+		`arc_upper_margin: ${pct(input.stateSnapshot.upperMargin)}`,
 		`arc_mode: ${input.stateSnapshot.mode}`,
 		`arc_auto: ${input.stateSnapshot.auto}`,
 		`arc_window_tokens: ${input.stateSnapshot.practicalWindowTokens}`,
@@ -496,6 +517,7 @@ function parseArcPacketState(text: string): Partial<ArcState> | null {
 	const parsed: Partial<ArcState> = {};
 	const contextId = packetField(text, "context_id");
 	const threshold = parseThreshold(packetField(text, "arc_threshold") ?? "");
+	const upperMargin = parseThreshold(packetField(text, "arc_upper_margin") ?? "");
 	const mode = packetField(text, "arc_mode");
 	const auto = packetField(text, "arc_auto");
 	const window = Number.parseInt(packetField(text, "arc_window_tokens") ?? "", 10);
@@ -506,6 +528,7 @@ function parseArcPacketState(text: string): Partial<ArcState> | null {
 	const hydrationMode = packetField(text, "arc_hydration_mode");
 	if (contextId) parsed.contextId = contextId;
 	if (threshold) parsed.threshold = threshold;
+	if (upperMargin) parsed.upperMargin = upperMargin;
 	if (mode === "off" || mode === "practical" || mode === "full") parsed.mode = mode;
 	if (auto === "true" || auto === "false") parsed.auto = auto === "true";
 	if (Number.isFinite(window) && window > 0) parsed.practicalWindowTokens = window;
@@ -521,7 +544,7 @@ function packetPathFor(newSessionId: string): string {
 	return join(ARC_RUNTIME_DIR, "packets", `${newSessionId}.md`);
 }
 
-function writeTriggerFile(input: { command: string; reason: string; cwd: string; tokens: number; thresholdTokens?: number | null; threshold: number }) {
+function writeTriggerFile(input: { command: string; reason: string; cwd: string; tokens: number; thresholdTokens?: number | null; upperThresholdTokens?: number | null; threshold: number; upperMargin: number }) {
 	try {
 		mkdirSync(ARC_RUNTIME_DIR, { recursive: true });
 		writeFileSync(ARC_TRIGGER_PATH, JSON.stringify({
@@ -547,6 +570,7 @@ function getLatestStateFromBranch(branch: readonly any[]): ArcState | null {
 function statusText(state: ArcState, usage?: ContextUsageLike, model?: unknown): string {
 	const window = effectiveWindow(state, usage?.contextWindow);
 	const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
+	const upperTokens = upperThresholdTokens(state, thresholdTokens, window);
 	const usageLine = usage?.tokens == null
 		? "Current usage: unknown"
 		: `Current usage: ${usage.tokens.toLocaleString()} tokens${window ? ` / ${window.toLocaleString()} ARC window` : ""}`;
@@ -555,13 +579,14 @@ function statusText(state: ArcState, usage?: ContextUsageLike, model?: unknown):
 		`Status line: ${formatStatusLine(state, usage) ?? "hidden"}`,
 		`Mode: ${state.mode}`,
 		`Threshold: ${pct(state.threshold)}${thresholdTokens ? ` (~${thresholdTokens.toLocaleString()} tokens)` : ""}`,
+		`Upper limit: +${pct(state.upperMargin)}${upperTokens && window ? ` (${pct(upperTokens / window)}, ~${upperTokens.toLocaleString()} tokens)` : ""}`,
 		`Practical window: ${state.practicalWindowTokens.toLocaleString()} tokens`,
 		`Max recent messages in packet: ${state.maxRecentMessages}`,
 		`Replenish transcript budget: ${state.replenishLines.toLocaleString()} lines`,
 		`Continuity-file budget: ${state.continuityFileLines.toLocaleString()} lines`,
 		`Instruction-file budget: ${state.instructionFileLines.toLocaleString()} lines`,
 		`Hydration mode: ${state.hydrationMode}`,
-		`Pending: ${state.manualPending ? "manual" : state.thresholdPending ? "threshold" : "none"}`,
+		`Pending: ${pendingText(state)}`,
 		`Cooldown: ${state.cooldownRemaining}/${state.cooldownTurns} turns`,
 		usageLine,
 		model ? "" : undefined,
@@ -581,14 +606,15 @@ function formatStatusLine(state: ArcState, usage?: ContextUsageLike): string | u
 	const mode = state.auto ? "A" : "M";
 	const window = effectiveWindow(state, usage?.contextWindow);
 	const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
+	const upperTokens = upperThresholdTokens(state, thresholdTokens, window);
 	const tokens = usage?.tokens ?? state.lastObservedTokens;
-	if (!thresholdTokens || tokens == null) return `ARC ${mode} ${state.mode} ${pct(state.threshold)}`;
+	if (!thresholdTokens || tokens == null) return `ARC ${mode} ${state.mode} ${pct(state.threshold)} +${pct(state.upperMargin)}`;
 
 	const ratio = Math.max(0, tokens / thresholdTokens);
 	const width = 8;
 	const filled = Math.min(width, Math.max(0, Math.round(ratio * width)));
 	const bar = `${"▰".repeat(filled)}${"▱".repeat(width - filled)}`;
-	const suffix = ratio >= 1 ? " !" : state.cooldownRemaining > 0 ? ` ↻${state.cooldownRemaining}` : "";
+	const suffix = upperTokens && tokens >= upperTokens ? " !!" : ratio >= 1 ? " !" : state.cooldownRemaining > 0 ? ` ↻${state.cooldownRemaining}` : "";
 	return `ARC ${mode} ${bar} ${compactTokens(tokens)}/${compactTokens(thresholdTokens)}${suffix}`;
 }
 
@@ -604,21 +630,30 @@ function debugText(state: ArcState, usage?: ContextUsageLike, model?: unknown, r
 	const contextWindow = contextWindowFor(model, usage);
 	const effective = effectiveWindow(state, usage?.contextWindow);
 	const thresholdTokens = effective ? Math.floor(effective * state.threshold) : null;
+	const upperTokens = upperThresholdTokens(state, thresholdTokens, effective);
 	const tokens = usage?.tokens ?? null;
 	const over = tokens != null && thresholdTokens != null ? tokens >= thresholdTokens : null;
+	const overUpper = tokens != null && upperTokens != null ? tokens >= upperTokens : null;
+	const nextAdvisory = overUpper === true && !state.upperPending
+		? "upper"
+		: over === true && !state.thresholdPending
+			? "threshold"
+			: "none";
 	const blockedReason = state.mode === "off"
 		? "mode=off"
 		: !state.auto
 			? "auto=false"
 			: state.cooldownRemaining > 0
 				? `cooldown=${state.cooldownRemaining}`
-				: rolloverQueued
-					? "already queued"
-					: over === true
-						? "not blocked"
-						: over === false
-							? "below threshold"
-							: "usage unknown";
+				: nextAdvisory !== "none"
+					? "not blocked"
+					: overUpper === true
+						? "upper already advised"
+						: over === true
+							? "threshold already advised"
+							: over === false
+								? "below threshold"
+								: "usage unknown";
 	return [
 		"ARC debug:",
 		`  model: ${currentModelLabel(model)}`,
@@ -638,9 +673,13 @@ function debugText(state: ArcState, usage?: ContextUsageLike, model?: unknown, r
 		`    effectiveWindow: ${effective == null ? "null" : effective.toLocaleString()}`,
 		`    threshold: ${pct(state.threshold)}`,
 		`    thresholdTokens: ${thresholdTokens == null ? "null" : thresholdTokens.toLocaleString()}`,
+		`    upperMargin: +${pct(state.upperMargin)}`,
+		`    upperThresholdTokens: ${upperTokens == null ? "null" : upperTokens.toLocaleString()}`,
 		`    tokens >= thresholdTokens: ${over == null ? "unknown" : over}`,
+		`    tokens >= upperThresholdTokens: ${overUpper == null ? "unknown" : overUpper}`,
 		`    rolloverQueued: ${rolloverQueued}`,
 		`    thresholdPending: ${state.thresholdPending}`,
+		`    upperPending: ${state.upperPending}`,
 		`    cooldownRemaining: ${state.cooldownRemaining}`,
 		`    queueBlockedBy: ${blockedReason}`,
 		`  statusLine: ${formatStatusLine(state, usage) ?? "hidden"}`,
@@ -665,6 +704,10 @@ function parseArcCommand(args: string): { action: string; threshold?: number; va
 	if ((head === "limit" || head === "threshold") && parts[1]) {
 		const threshold = parseThreshold(parts[1]);
 		return threshold ? { action: "threshold", threshold } : { action: "unknown" };
+	}
+	if ((head === "upper" || head === "imminent") && parts[1]) {
+		const threshold = parseThreshold(parts[1]);
+		return threshold ? { action: "upper", threshold } : { action: "unknown" };
 	}
 	if (head === "window" && parts[1]) return { action: "window", value: parts[1] };
 	if ((head === "replenish" || head === "replenish-lines") && parts[1]) return { action: "replenish", value: parts[1] };
@@ -693,27 +736,42 @@ export default function arcExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus(EXTENSION_TYPE, formatStatusLine(state, ctx.getContextUsage()));
 	}
 
-	function adviseThresholdRollover(ctx: Pick<ExtensionContext, "ui" | "cwd">, usage: ContextUsageLike, reason = "threshold") {
-		if (rolloverQueued || state.mode === "off" || !state.auto || usage.tokens == null) return false;
+	function adviseThresholdRollover(ctx: Pick<ExtensionContext, "hasUI" | "ui" | "cwd" | "getContextUsage">, usage: ContextUsageLike, reason = "threshold", level: ArcAdvisoryLevel = "threshold") {
+		if (state.mode === "off" || !state.auto || usage.tokens == null) return false;
+		if (level === "threshold" && state.thresholdPending) return false;
+		if (level === "upper" && state.upperPending) return false;
 		rolloverQueued = true;
-		state = { ...state, thresholdPending: true, lastObservedTokens: usage.tokens };
+		state = {
+			...state,
+			thresholdPending: true,
+			upperPending: level === "upper" ? true : state.upperPending,
+			lastObservedTokens: usage.tokens,
+		};
 		persistState();
+		updateStatus(ctx);
 		// Extension-originated sendUserMessage intentionally bypasses slash-command
 		// handling, so do not try to enqueue /arc-rollover here. Event hooks do not
 		// expose ctx.newSession(); draft the command and write a trigger for an
 		// optional external driver to submit through Pi's command path.
 		const command = `/${INTERNAL_ROLLOVER_COMMAND} ${reason}`;
 		const window = effectiveWindow(state, usage.contextWindow);
+		const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
 		writeTriggerFile({
 			command,
 			reason,
 			cwd: ctx.cwd,
 			tokens: usage.tokens,
-			thresholdTokens: window ? Math.floor(window * state.threshold) : null,
+			thresholdTokens,
+			upperThresholdTokens: upperThresholdTokens(state, thresholdTokens, window),
 			threshold: state.threshold,
+			upperMargin: state.upperMargin,
 		});
 		ctx.ui.setEditorText(command);
-		ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; ${command} is drafted. Press Enter to refresh, or run an ARC driver.`, "warning");
+		if (level === "upper") {
+			ctx.ui.notify(`ARC upper limit crossed at ${usage.tokens.toLocaleString()} tokens; refresh should be imminent. ${command} is drafted.`, "warning");
+		} else {
+			ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; ${command} is drafted. Press Enter to refresh, or continue until the upper limit.`, "warning");
+		}
 		return true;
 	}
 
@@ -770,6 +828,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				contextId,
 				manualPending: reason === "manual",
 				thresholdPending: reason !== "manual",
+				upperPending: reason === "upper",
 				lastPacketPath: packetPath,
 				lastRolloverAt: createdAt,
 			};
@@ -824,6 +883,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 			...next,
 			manualPending: false,
 			thresholdPending: false,
+			upperPending: false,
 			lastObservedTokens: null,
 			cooldownRemaining: next.cooldownTurns,
 		};
@@ -838,7 +898,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 			updateStatus(ctx);
 			return;
 		}
-		if (!state.auto || state.mode === "off" || rolloverQueued) {
+		if (!state.auto || state.mode === "off") {
 			updateStatus(ctx);
 			return;
 		}
@@ -853,19 +913,36 @@ export default function arcExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const thresholdTokens = Math.floor(window * state.threshold);
-		const isAbove = usage.tokens >= thresholdTokens;
-		state = { ...state, lastObservedTokens: usage.tokens, thresholdPending: isAbove };
+		const upperTokens = upperThresholdTokens(state, thresholdTokens, window);
+		const isAboveThreshold = usage.tokens >= thresholdTokens;
+		const isAboveUpper = upperTokens != null && usage.tokens >= upperTokens;
+		const wasThresholdPending = state.thresholdPending;
+		const wasUpperPending = state.upperPending;
+		state = {
+			...state,
+			lastObservedTokens: usage.tokens,
+			thresholdPending: isAboveThreshold ? state.thresholdPending : false,
+			upperPending: isAboveUpper ? state.upperPending : false,
+		};
 		persistState();
 		updateStatus(ctx);
-		if (!isAbove) return;
+		if (!isAboveThreshold) {
+			rolloverQueued = false;
+			return;
+		}
 		// Safe-boundary policy: if we are over threshold at turn end, advise ARC.
 		// Event contexts cannot call ctx.newSession(), so this drafts the internal
-		// command for the user to submit through Pi's command path.
-		adviseThresholdRollover(ctx, usage, "threshold");
+		// command for the user to submit through Pi's command path. A deleted soft
+		// draft is respected until the upper limit is crossed, when ARC escalates.
+		if (isAboveUpper && !wasUpperPending) {
+			adviseThresholdRollover(ctx, usage, "upper", "upper");
+		} else if (!isAboveUpper && !wasThresholdPending) {
+			adviseThresholdRollover(ctx, usage, "threshold", "threshold");
+		}
 	});
 
 	pi.registerCommand("arc", {
-		description: "ARC safe-boundary session refresh: status, debug, check, now, recommend, hydrate, replenish, continuity, on, off",
+		description: "ARC safe-boundary session refresh: status, debug, check, now, recommend, upper, hydrate, replenish, continuity, on, off",
 		handler: async (args, ctx) => {
 			const parsed = parseArcCommand(args);
 			if (parsed.action === "status") {
@@ -896,7 +973,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (parsed.action === "disable") {
-				state = { ...state, mode: "off", manualPending: false, thresholdPending: false };
+				state = { ...state, mode: "off", manualPending: false, thresholdPending: false, upperPending: false };
 				persistState();
 				updateStatus(ctx);
 				show("ARC disabled. Pi default compaction remains available.");
@@ -940,7 +1017,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (parsed.action === "threshold" && parsed.threshold) {
-				state = { ...state, threshold: parsed.threshold, thresholdPending: false };
+				state = { ...state, threshold: parsed.threshold, thresholdPending: false, upperPending: false };
 				persistState();
 				const usage = ctx.getContextUsage();
 				const window = effectiveWindow(state, usage?.contextWindow);
@@ -957,13 +1034,24 @@ export default function arcExtension(pi: ExtensionAPI) {
 				if (alreadyOverThreshold) await performRollover(ctx, "threshold");
 				return;
 			}
+			if (parsed.action === "upper" && parsed.threshold) {
+				state = { ...state, upperMargin: parsed.threshold, thresholdPending: false, upperPending: false };
+				persistState();
+				const usage = ctx.getContextUsage();
+				const window = effectiveWindow(state, usage?.contextWindow);
+				const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
+				const upperTokens = upperThresholdTokens(state, thresholdTokens, window);
+				updateStatus(ctx);
+				show(`ARC upper limit set to +${pct(parsed.threshold)}${upperTokens && window ? ` (${pct(upperTokens / window)}, ~${upperTokens.toLocaleString()} tokens)` : ""}.`);
+				return;
+			}
 			if (parsed.action === "window" && parsed.value) {
 				const n = Number.parseInt(parsed.value.replace(/,/g, ""), 10);
 				if (!Number.isFinite(n) || n <= 0) {
 					show("Usage: /arc window <tokens>");
 					return;
 				}
-				state = { ...state, practicalWindowTokens: n, thresholdPending: false };
+				state = { ...state, practicalWindowTokens: n, thresholdPending: false, upperPending: false };
 				persistState();
 				updateStatus(ctx);
 				show(`ARC practical window set to ${n.toLocaleString()} tokens.`);
@@ -1021,7 +1109,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				await performRollover(ctx, "manual");
 				return;
 			}
-			show("Usage: /arc [status|debug|check|recommend|now|35%|threshold 35%|on|off|auto|manual|hydrate auto|draft|practical|full|window <tokens>|replenish <lines>|continuity <lines>|instructions <lines>|recent <count>]");
+			show("Usage: /arc [status|debug|check|recommend|now|35%|threshold 35%|upper 20%|on|off|auto|manual|hydrate auto|draft|practical|full|window <tokens>|replenish <lines>|continuity <lines>|instructions <lines>|recent <count>]");
 		},
 	});
 

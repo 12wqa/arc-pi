@@ -35,21 +35,23 @@ For ARC, the practical takeaway is: use advertised context length as a hard ceil
 
 ## Recommendation model
 
-ARC has two threshold knobs and two replenish knobs:
+ARC has three threshold/window knobs and two replenish knobs:
 
 ```text
 /arc window <tokens>      # practical operating window
 /arc <percent>            # refresh threshold as percentage of that window
+/arc upper <percent>      # imminent warning margin beyond the refresh threshold
 /arc replenish <lines>    # recent transcript lines copied into the handoff packet
 /arc instructions <lines> # AGENTS.md/agent.md/CLAUDE.md-style instruction lines copied into the packet
 ```
 
-The threshold remains user-tuned. Replenish controls how much meaning the new short-burst session starts with after a refresh.
+The threshold remains user-tuned. The upper margin lets a user push through a soft refresh prompt without getting nagged every turn; ARC escalates once the imminent limit is reached. Replenish controls how much meaning the new short-burst session starts with after a refresh.
 
-Refresh target:
+Refresh target and upper/imminent target:
 
 ```text
 refresh_tokens = practical_window * threshold
+upper_tokens = refresh_tokens * (1 + upper_margin)
 ```
 
 Example:
@@ -58,9 +60,10 @@ Example:
 /arc practical
 /arc window 100000
 /arc 40%
+/arc upper 20%
 ```
 
-This refreshes at about 40,000 tokens.
+This refreshes at about 40,000 tokens and escalates at about 48,000 tokens if the drafted refresh is skipped.
 
 ## Initial recommendation table
 
@@ -127,7 +130,7 @@ Prefer changing threshold first for refresh timing. Change `window` when a whole
 
 ## Extension behavior
 
-The extension currently embeds a small rule-based recommender matching the table above. It is intentionally conservative and offline. It also supports auto-hydration (`/arc hydrate auto`) once a refresh command is running, so `/arc now`, `/arc check`, and over-threshold `/arc <percent>` can immediately continue in the replacement session. Passive `turn_end` detection can only draft `/arc-rollover threshold` because Pi currently exposes session replacement only to command handlers. Use `/arc hydrate draft` if you want to inspect/edit each packet before submitting. When the user runs:
+The extension currently embeds a small rule-based recommender matching the table above. It is intentionally conservative and offline. It also supports auto-hydration (`/arc hydrate auto`) once a refresh command is running, so `/arc now`, `/arc check`, and over-threshold `/arc <percent>` can immediately continue in the replacement session. Passive `turn_end` detection can only draft `/arc-rollover threshold` because Pi currently exposes session replacement only to command handlers. If that draft is deleted, ARC waits until the `/arc upper <percent>` imminent limit before drafting `/arc-rollover upper`. Use `/arc hydrate draft` if you want to inspect/edit each packet before submitting. When the user runs:
 
 ```text
 /arc
