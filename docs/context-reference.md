@@ -35,12 +35,16 @@ For ARC, the practical takeaway is: use advertised context length as a hard ceil
 
 ## Recommendation model
 
-ARC has two knobs:
+ARC has two threshold knobs and two replenish knobs:
 
 ```text
-/arc window <tokens>  # practical operating window
-/arc <percent>        # threshold as percentage of that window
+/arc window <tokens>      # practical operating window
+/arc <percent>            # refresh threshold as percentage of that window
+/arc replenish <lines>    # recent transcript lines copied into the handoff packet
+/arc instructions <lines> # AGENTS.md/agent.md/CLAUDE.md-style instruction lines copied into the packet
 ```
+
+The threshold remains user-tuned. Replenish controls how much meaning the new short-burst session starts with after a refresh.
 
 Refresh target:
 
@@ -119,11 +123,11 @@ If ARC refreshes too often and continuity is excellent, raise threshold graduall
 /arc 50%
 ```
 
-Prefer changing threshold first. Change `window` when a whole model family needs a different premium band.
+Prefer changing threshold first for refresh timing. Change `window` when a whole model family needs a different premium band. Change `replenish` when the refreshed session starts too thin or too bloated; values around 800-1,500 lines are intended for fast short-burst coding handoffs.
 
 ## Extension behavior
 
-The extension currently embeds a small rule-based recommender matching the table above. It is intentionally conservative and offline. When the user runs:
+The extension currently embeds a small rule-based recommender matching the table above. It is intentionally conservative and offline. It also supports auto-hydration (`/arc hydrate auto`) so threshold refreshes can immediately continue in the replacement session; use `/arc hydrate draft` if you want to inspect/edit each packet before submitting. When the user runs:
 
 ```text
 /arc
