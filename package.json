@@ -1,6 +1,6 @@
 {
   "name": "arc-pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ARC (Adaptive Refresh Cycle) safe-boundary session refresh for Pi.",
   "keywords": [
     "pi-package",
