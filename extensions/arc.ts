@@ -426,84 +426,87 @@ export default function arcExtension(pi: ExtensionAPI) {
 	}
 
 	async function performRollover(ctx: ExtensionCommandContext, reason: string) {
-		await ctx.waitForIdle();
-		if (state.mode === "off" && reason !== "manual") {
+		try {
+			await ctx.waitForIdle();
+			if (state.mode === "off" && reason !== "manual") {
+				rolloverQueued = false;
+				return;
+			}
+
+			const branch = ctx.sessionManager.getBranch() as readonly any[];
+			const oldSessionFile = ctx.sessionManager.getSessionFile();
+			const oldSessionId = ctx.sessionManager.getSessionId?.() ?? oldSessionFile ?? "unknown-session";
+			const contextId = state.contextId ?? `arc_${randomUUID()}`;
+			const recentMessages = getRecentCleanMessages(branch, state.maxRecentMessages);
+			const parentSession = oldSessionFile;
+			const createdAt = new Date().toISOString();
+			let packetPath: string | undefined;
+
+			if (recentMessages.length === 0) {
+				show("ARC rollover skipped: no conversation messages found to hydrate the new session.");
+				rolloverQueued = false;
+				return;
+			}
+
+			state = {
+				...state,
+				contextId,
+				manualPending: reason === "manual",
+				thresholdPending: reason !== "manual",
+			};
+			persistState();
+
+			const result = await ctx.newSession({
+				parentSession,
+				setup: async (sessionManager: any) => {
+					const newSessionId = sessionManager.getSessionId?.() ?? `arc_${randomUUID()}`;
+					const packet = renderPacket({
+						contextId,
+						oldSessionId,
+						oldSessionFile,
+						newSessionId,
+						cwd: ctx.cwd,
+						platform: "pi",
+						threshold: state.threshold,
+						reason,
+						createdAt,
+						recentMessages,
+					});
+					packetPath = packetPathFor(newSessionId);
+					await mkdir(join(homedir(), ".pi", "agent", "arc", "packets"), { recursive: true });
+					await writeFile(packetPath, packet, "utf8");
+					sessionManager.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: packet }],
+						timestamp: Date.now(),
+					});
+					sessionManager.appendCustomEntry?.(STATE_TYPE, {
+						...state,
+						manualPending: false,
+						thresholdPending: false,
+						lastObservedTokens: null,
+						cooldownRemaining: state.cooldownTurns,
+						lastPacketPath: packetPath,
+						lastRolloverAt: createdAt,
+						contextId,
+					});
+				},
+				withSession: async (replacementCtx) => {
+					// Keep this deliberately UI-only. Injecting another custom message from
+					// the replacement callback can race some interactive session-rebind paths.
+					replacementCtx.ui.notify(`ARC refreshed into a new session${packetPath ? ` (${packetPath})` : ""}.`, "info");
+				},
+			});
+
 			rolloverQueued = false;
-			return;
-		}
-
-		const branch = ctx.sessionManager.getBranch() as readonly any[];
-		const oldSessionFile = ctx.sessionManager.getSessionFile();
-		const oldSessionId = ctx.sessionManager.getSessionId?.() ?? oldSessionFile ?? "unknown-session";
-		const contextId = state.contextId ?? `arc_${randomUUID()}`;
-		const recentMessages = getRecentCleanMessages(branch, state.maxRecentMessages);
-		const parentSession = oldSessionFile;
-		const createdAt = new Date().toISOString();
-		let packetPath: string | undefined;
-
-		if (recentMessages.length === 0) {
-			show("ARC rollover skipped: no conversation messages found to hydrate the new session.");
+			if (result.cancelled) {
+				show("ARC rollover cancelled by session switch guard.");
+				return;
+			}
+		} catch (error) {
 			rolloverQueued = false;
-			return;
-		}
-
-		state = {
-			...state,
-			contextId,
-			manualPending: reason === "manual",
-			thresholdPending: reason !== "manual",
-		};
-		persistState();
-
-		const result = await ctx.newSession({
-			parentSession,
-			setup: async (sessionManager: any) => {
-				const newSessionId = sessionManager.getSessionId?.() ?? `arc_${randomUUID()}`;
-				const packet = renderPacket({
-					contextId,
-					oldSessionId,
-					oldSessionFile,
-					newSessionId,
-					cwd: ctx.cwd,
-					platform: "pi",
-					threshold: state.threshold,
-					reason,
-					createdAt,
-					recentMessages,
-				});
-				packetPath = packetPathFor(newSessionId);
-				await mkdir(join(homedir(), ".pi", "agent", "arc", "packets"), { recursive: true });
-				await writeFile(packetPath, packet, "utf8");
-				sessionManager.appendMessage({
-					role: "user",
-					content: [{ type: "text", text: packet }],
-					timestamp: Date.now(),
-				});
-				sessionManager.appendCustomEntry?.(STATE_TYPE, {
-					...state,
-					manualPending: false,
-					thresholdPending: false,
-					lastObservedTokens: null,
-					cooldownRemaining: state.cooldownTurns,
-					lastPacketPath: packetPath,
-					lastRolloverAt: createdAt,
-					contextId,
-				});
-			},
-			withSession: async (replacementCtx) => {
-				replacementCtx.ui.notify(`ARC refreshed into a new session${packetPath ? ` (${packetPath})` : ""}.`, "info");
-				await replacementCtx.sendMessage({
-					customType: EXTENSION_TYPE,
-					content: `ARC refreshed into a new session. Packet: ${packetPath ?? "stored in session"}`,
-					display: true,
-				});
-			},
-		});
-
-		rolloverQueued = false;
-		if (result.cancelled) {
-			show("ARC rollover cancelled by session switch guard.");
-			return;
+			const message = error instanceof Error ? error.message : String(error);
+			show(`ARC rollover failed safely: ${message}`);
 		}
 	}
 

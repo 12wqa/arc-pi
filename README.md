@@ -74,3 +74,19 @@ npm run pack:check
 ## Safety notes
 
 ARC packets exclude system prompts and redact common API-key/token/secret shapes as `[REDACTED]`. Redaction is a safety net, not a reason to paste real secrets into chat.
+
+## Troubleshooting
+
+### `/arc now` exits instead of staying in Pi
+
+That is not the intended behavior. `/arc now` should switch to a new Pi session and keep the TUI open. If your terminal returns to the shell, restart Pi and use `/resume`; the ARC-created session should be available because the packet is written before session replacement completes. Packet audit copies live under:
+
+```text
+~/.pi/agent/arc/packets/
+```
+
+If it keeps happening, disable automatic ARC while debugging:
+
+```text
+/arc manual
+```
