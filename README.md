@@ -19,7 +19,8 @@ pi -e /path/to/arc-pi
 ```text
 /arc                 # status
 /arc now             # create a safe-boundary ARC handoff session now
-/arc 35%             # set refresh threshold
+/arc recommend       # show suggested settings for the current model
+/arc 35%             # set refresh threshold and show current-model recommendation
 /arc threshold 35%   # same as above
 /arc auto            # enable automatic threshold refresh
 /arc manual          # disable automatic refresh; keep /arc now
@@ -43,6 +44,10 @@ The extension watches Pi context usage at `turn_end`. When the configured thresh
 6. seeds the new session with the ARC packet as the first user message.
 
 This uses public Pi extension APIs rather than monkeypatching Pi internals.
+
+## Context recommendations
+
+See [`docs/context-reference.md`](docs/context-reference.md) for model-family degradation notes, OpenRouter metadata fields, a data-capture schema, and the recommendation table used by `/arc recommend`.
 
 ## Development
 

@@ -54,6 +54,17 @@ type CleanMessage = {
 	content: string;
 };
 
+type ContextUsageLike = { tokens: number | null; contextWindow: number; percent: number | null };
+
+type ModelRecommendation = {
+	family: string;
+	practicalWindowTokens: number;
+	threshold: number;
+	refreshTokens: number;
+	confidence: "observed-pattern" | "metadata-derived" | "fallback";
+	rationale: string;
+};
+
 const SECRET_PATTERNS = [
 	/\bsk-[A-Za-z0-9_-]{12,}\b/g,
 	/\b(?:api[_-]?key|token|secret)\s*[:=]\s*['"]?[^\s'"]+/gi,
@@ -128,6 +139,95 @@ function effectiveWindow(state: ArcState, modelContextWindow?: number): number |
 	if (state.mode === "full") return full;
 	if (full) return Math.min(full, state.practicalWindowTokens);
 	return state.practicalWindowTokens;
+}
+
+function modelField(model: unknown, field: string): unknown {
+	return model && typeof model === "object" ? (model as Record<string, unknown>)[field] : undefined;
+}
+
+function currentModelLabel(model: unknown): string {
+	const provider = modelField(model, "provider");
+	const id = modelField(model, "id");
+	const name = modelField(model, "name");
+	if (typeof provider === "string" && typeof id === "string") return `${provider}/${id}`;
+	if (typeof id === "string") return id;
+	if (typeof name === "string") return name;
+	return "unknown model";
+}
+
+function contextWindowFor(model: unknown, usage?: ContextUsageLike): number | undefined {
+	const candidates = [
+		usage?.contextWindow,
+		modelField(model, "contextWindow"),
+		modelField(model, "context_length"),
+		modelField(model, "contextLength"),
+	];
+	for (const candidate of candidates) {
+		if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) return candidate;
+	}
+	return undefined;
+}
+
+function capWindow(target: number, contextWindow?: number): number {
+	if (!contextWindow || contextWindow <= 0) return target;
+	return Math.max(4_000, Math.min(target, contextWindow));
+}
+
+function buildRecommendation(model: unknown, usage?: ContextUsageLike): ModelRecommendation {
+	const label = currentModelLabel(model).toLowerCase();
+	const contextWindow = contextWindowFor(model, usage);
+	const rec = (family: string, window: number, threshold: number, confidence: ModelRecommendation["confidence"], rationale: string): ModelRecommendation => {
+		const practicalWindowTokens = capWindow(window, contextWindow);
+		return {
+			family,
+			practicalWindowTokens,
+			threshold,
+			refreshTokens: Math.floor(practicalWindowTokens * threshold),
+			confidence,
+			rationale,
+		};
+	};
+
+	if (label.includes("claude") || label.includes("anthropic")) {
+		if ((contextWindow ?? 0) >= 500_000) {
+			return rec("Claude very-long-context", 160_000, 0.35, "metadata-derived", "large advertised windows are useful, but ARC keeps the working set well below the noisy middle");
+		}
+		return rec("Claude", 100_000, 0.40, "observed-pattern", "Claude usually stays sharp when tool-heavy sessions refresh before the 50k-token zone");
+	}
+	if (label.includes("gemini") || label.includes("google/")) {
+		return rec("Gemini", 200_000, 0.35, "metadata-derived", "Gemini long-context models tolerate larger windows, but conservative refresh keeps retrieval pressure low");
+	}
+	if (label.includes("gpt") || label.includes("openai") || /\bo[134]\b/.test(label)) {
+		return rec("OpenAI GPT/o-series", 80_000, 0.45, "metadata-derived", "OpenAI long-context models are strong but benefit from avoiding late-context tool clutter");
+	}
+	if (label.includes("qwen") || label.includes("deepseek") || label.includes("kimi") || label.includes("moonshot")) {
+		return rec("Open-weight long-context", 64_000, 0.45, "fallback", "open-weight long-context behavior varies widely, so start conservative and tune upward");
+	}
+	if (label.includes("llama") || label.includes("mistral") || label.includes("mixtral") || label.includes("local")) {
+		return rec("local/open model", 32_000, 0.55, "fallback", "smaller or local models typically degrade earlier under agent/tool transcripts");
+	}
+	if (contextWindow && contextWindow <= 32_768) {
+		return rec("small-context model", 20_000, 0.60, "metadata-derived", "small windows need a higher threshold but a small practical window");
+	}
+	if (contextWindow && contextWindow <= 65_536) {
+		return rec("medium-context model", 32_000, 0.55, "metadata-derived", "medium windows should refresh before tool output dominates the middle of context");
+	}
+	if (contextWindow && contextWindow >= 200_000) {
+		return rec("generic long-context model", 100_000, 0.40, "fallback", "generic long-context recommendation prioritizes premium-state behavior over maximum capacity");
+	}
+	return rec("generic model", 64_000, 0.45, "fallback", "no specific model profile matched; use this as a safe starting point");
+}
+
+function formatRecommendation(model: unknown, usage?: ContextUsageLike): string {
+	const recommendation = buildRecommendation(model, usage);
+	return [
+		`Recommendation for ${currentModelLabel(model)} (${recommendation.family}, ${recommendation.confidence}):`,
+		`  /arc practical`,
+		`  /arc window ${recommendation.practicalWindowTokens}`,
+		`  /arc ${pct(recommendation.threshold)}`,
+		`Refresh target: ~${recommendation.refreshTokens.toLocaleString()} tokens.`,
+		`Why: ${recommendation.rationale}.`,
+	].join("\n");
 }
 
 function contentToText(content: unknown): string {
@@ -242,7 +342,7 @@ function getLatestStateFromBranch(branch: readonly any[]): ArcState | null {
 	return null;
 }
 
-function statusText(state: ArcState, usage?: { tokens: number | null; contextWindow: number; percent: number | null }): string {
+function statusText(state: ArcState, usage?: ContextUsageLike, model?: unknown): string {
 	const window = effectiveWindow(state, usage?.contextWindow);
 	const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
 	const usageLine = usage?.tokens == null
@@ -257,8 +357,10 @@ function statusText(state: ArcState, usage?: { tokens: number | null; contextWin
 		`Pending: ${state.manualPending ? "manual" : state.thresholdPending ? "threshold" : "none"}`,
 		`Cooldown: ${state.cooldownRemaining}/${state.cooldownTurns} turns`,
 		usageLine,
+		model ? "" : undefined,
+		model ? formatRecommendation(model, usage) : undefined,
 		state.lastPacketPath ? `Last packet: ${state.lastPacketPath}` : undefined,
-	].filter(Boolean).join("\n");
+	].filter((line) => line !== undefined).join("\n");
 }
 
 function parseArcCommand(args: string): { action: string; threshold?: number; value?: string } {
@@ -271,6 +373,7 @@ function parseArcCommand(args: string): { action: string; threshold?: number; va
 	if (head === "manual") return { action: "manual" };
 	if (head === "auto") return { action: "auto" };
 	if (head === "now") return { action: "rollover", value: "manual" };
+	if (head === "recommend" || head === "recommended") return { action: "recommend" };
 	if ((head === "limit" || head === "threshold") && parts[1]) {
 		const threshold = parseThreshold(parts[1]);
 		return threshold ? { action: "threshold", threshold } : { action: "unknown" };
@@ -406,11 +509,15 @@ export default function arcExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("arc", {
-		description: "ARC safe-boundary session refresh: status, now, 35%, on, off, practical, full",
+		description: "ARC safe-boundary session refresh: status, now, recommend, 35%, on, off, practical, full",
 		handler: async (args, ctx) => {
 			const parsed = parseArcCommand(args);
 			if (parsed.action === "status") {
-				show(statusText(state, ctx.getContextUsage()));
+				show(statusText(state, ctx.getContextUsage(), ctx.model));
+				return;
+			}
+			if (parsed.action === "recommend") {
+				show(formatRecommendation(ctx.model, ctx.getContextUsage()));
 				return;
 			}
 			if (parsed.action === "disable") {
@@ -449,7 +556,11 @@ export default function arcExtension(pi: ExtensionAPI) {
 			if (parsed.action === "threshold" && parsed.threshold) {
 				state = { ...state, threshold: parsed.threshold, thresholdPending: false };
 				persistState();
-				show(`ARC threshold set to ${pct(parsed.threshold)}. Refresh will wait for a safe boundary.`);
+				show([
+					`ARC threshold set to ${pct(parsed.threshold)}. Refresh will wait for a safe boundary.`,
+					"",
+					formatRecommendation(ctx.model, ctx.getContextUsage()),
+				].join("\n"));
 				return;
 			}
 			if (parsed.action === "window" && parsed.value) {
@@ -478,7 +589,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				await performRollover(ctx, "manual");
 				return;
 			}
-			show("Usage: /arc [status|now|35%|threshold 35%|on|off|auto|manual|practical|full|window <tokens>|recent <count>]");
+			show("Usage: /arc [status|recommend|now|35%|threshold 35%|on|off|auto|manual|practical|full|window <tokens>|recent <count>]");
 		},
 	});
 
