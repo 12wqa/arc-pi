@@ -1,0 +1,42 @@
+{
+  "name": "arc-pi",
+  "version": "0.1.0",
+  "description": "ARC (Adaptive Refresh Cycle) safe-boundary session refresh for Pi.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "context",
+    "compaction",
+    "handoff"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "extensions",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  }
+}
