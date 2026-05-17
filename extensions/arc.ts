@@ -425,6 +425,16 @@ export default function arcExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus(EXTENSION_TYPE, formatStatusLine(state, ctx.getContextUsage()));
 	}
 
+	function queueThresholdRollover(ctx: Pick<ExtensionContext, "ui">, usage: ContextUsageLike, reason = "threshold") {
+		if (rolloverQueued || state.mode === "off" || !state.auto || usage.tokens == null) return false;
+		rolloverQueued = true;
+		state = { ...state, thresholdPending: true, lastObservedTokens: usage.tokens };
+		persistState();
+		ctx.ui.notify(`ARC threshold is already crossed at ${usage.tokens.toLocaleString()} tokens; queuing safe-boundary refresh.`, "info");
+		pi.sendUserMessage(`/${INTERNAL_ROLLOVER_COMMAND} ${reason}`, { deliverAs: "followUp" });
+		return true;
+	}
+
 	async function performRollover(ctx: ExtensionCommandContext, reason: string) {
 		try {
 			await ctx.waitForIdle();
@@ -543,9 +553,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 		persistState();
 		updateStatus(ctx);
 		if (!isAbove || wasAbove) return;
-		rolloverQueued = true;
-		ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; queuing safe-boundary refresh.`, "info");
-		pi.sendUserMessage(`/${INTERNAL_ROLLOVER_COMMAND} threshold`, { deliverAs: "followUp" });
+		queueThresholdRollover(ctx, usage, "threshold");
 	});
 
 	pi.registerCommand("arc", {
@@ -598,11 +606,20 @@ export default function arcExtension(pi: ExtensionAPI) {
 			if (parsed.action === "threshold" && parsed.threshold) {
 				state = { ...state, threshold: parsed.threshold, thresholdPending: false };
 				persistState();
+				const usage = ctx.getContextUsage();
+				const window = effectiveWindow(state, usage?.contextWindow);
+				const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
+				const alreadyOverThreshold = Boolean(usage?.tokens != null && thresholdTokens && usage.tokens >= thresholdTokens);
+				if (alreadyOverThreshold && usage) {
+					queueThresholdRollover(ctx, usage, "threshold");
+				}
 				updateStatus(ctx);
 				show([
-					`ARC threshold set to ${pct(parsed.threshold)}. Refresh will wait for a safe boundary.`,
+					alreadyOverThreshold
+						? `ARC threshold set to ${pct(parsed.threshold)}. Current context is already over that threshold, so refresh has been queued for a safe boundary.`
+						: `ARC threshold set to ${pct(parsed.threshold)}. Refresh will wait for a safe boundary.`,
 					"",
-					formatRecommendation(ctx.model, ctx.getContextUsage()),
+					formatRecommendation(ctx.model, usage),
 				].join("\n"));
 				return;
 			}

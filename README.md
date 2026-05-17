@@ -21,7 +21,7 @@ pi -e /path/to/arc-pi
 /arc now             # create a safe-boundary ARC handoff session now
 /arc recommend       # show suggested settings for the current model
 /arc 35%             # set refresh threshold and show current-model recommendation
-/arc threshold 35%   # same as above
+/arc threshold 35%   # same as above; queues refresh if current context is already over threshold
 /arc auto            # enable automatic threshold refresh
 /arc manual          # disable automatic refresh; keep /arc now
 /arc off             # disable ARC
