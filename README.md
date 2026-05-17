@@ -18,6 +18,7 @@ pi -e /path/to/arc-pi
 
 ```text
 /arc                 # status
+/arc debug           # print raw ctx.getContextUsage() and ARC threshold math
 /arc now             # create a safe-boundary ARC handoff session now
 /arc recommend       # show suggested settings for the current model
 /arc 35%             # set refresh threshold and show current-model recommendation

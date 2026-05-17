@@ -386,6 +386,35 @@ function formatStatusLine(state: ArcState, usage?: ContextUsageLike): string | u
 	return `ARC ${mode} ${bar} ${compactTokens(tokens)}/${compactTokens(thresholdTokens)}${suffix}`;
 }
 
+function debugText(state: ArcState, usage?: ContextUsageLike, model?: unknown, rolloverQueued = false): string {
+	const contextWindow = contextWindowFor(model, usage);
+	const effective = effectiveWindow(state, usage?.contextWindow);
+	const thresholdTokens = effective ? Math.floor(effective * state.threshold) : null;
+	const tokens = usage?.tokens ?? null;
+	const over = tokens != null && thresholdTokens != null ? tokens >= thresholdTokens : null;
+	return [
+		"ARC debug:",
+		`  model: ${currentModelLabel(model)}`,
+		"  ctx.getContextUsage():",
+		`    tokens: ${tokens == null ? "null" : tokens.toLocaleString()}`,
+		`    contextWindow: ${usage?.contextWindow == null ? "undefined" : usage.contextWindow.toLocaleString()}`,
+		`    percent: ${usage?.percent == null ? "null" : `${Math.round(usage.percent * 100)}%`}`,
+		"  ARC calculation:",
+		`    mode: ${state.mode}`,
+		`    auto: ${state.auto}`,
+		`    practicalWindowTokens: ${state.practicalWindowTokens.toLocaleString()}`,
+		`    model/context window used for recommendation: ${contextWindow == null ? "unknown" : contextWindow.toLocaleString()}`,
+		`    effectiveWindow: ${effective == null ? "null" : effective.toLocaleString()}`,
+		`    threshold: ${pct(state.threshold)}`,
+		`    thresholdTokens: ${thresholdTokens == null ? "null" : thresholdTokens.toLocaleString()}`,
+		`    tokens >= thresholdTokens: ${over == null ? "unknown" : over}`,
+		`    rolloverQueued: ${rolloverQueued}`,
+		`    thresholdPending: ${state.thresholdPending}`,
+		`    cooldownRemaining: ${state.cooldownRemaining}`,
+		`  statusLine: ${formatStatusLine(state, usage) ?? "hidden"}`,
+	].join("\n");
+}
+
 function parseArcCommand(args: string): { action: string; threshold?: number; value?: string } {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
 	if (parts.length === 0 || parts[0] === "status") return { action: "status" };
@@ -397,6 +426,7 @@ function parseArcCommand(args: string): { action: string; threshold?: number; va
 	if (head === "auto") return { action: "auto" };
 	if (head === "now") return { action: "rollover", value: "manual" };
 	if (head === "recommend" || head === "recommended") return { action: "recommend" };
+	if (head === "debug" || head === "diagnose") return { action: "debug" };
 	if ((head === "limit" || head === "threshold") && parts[1]) {
 		const threshold = parseThreshold(parts[1]);
 		return threshold ? { action: "threshold", threshold } : { action: "unknown" };
@@ -557,11 +587,15 @@ export default function arcExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("arc", {
-		description: "ARC safe-boundary session refresh: status, now, recommend, 35%, on, off, practical, full",
+		description: "ARC safe-boundary session refresh: status, debug, now, recommend, 35%, on, off, practical, full",
 		handler: async (args, ctx) => {
 			const parsed = parseArcCommand(args);
 			if (parsed.action === "status") {
 				show(statusText(state, ctx.getContextUsage(), ctx.model));
+				return;
+			}
+			if (parsed.action === "debug") {
+				show(debugText(state, ctx.getContextUsage(), ctx.model, rolloverQueued));
 				return;
 			}
 			if (parsed.action === "recommend") {
@@ -651,7 +685,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				await performRollover(ctx, "manual");
 				return;
 			}
-			show("Usage: /arc [status|recommend|now|35%|threshold 35%|on|off|auto|manual|practical|full|window <tokens>|recent <count>]");
+			show("Usage: /arc [status|debug|recommend|now|35%|threshold 35%|on|off|auto|manual|practical|full|window <tokens>|recent <count>]");
 		},
 	});
 
