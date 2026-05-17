@@ -30,6 +30,7 @@ pi -e /path/to/arc-pi
 /arc hydrate draft   # draft the packet and wait for Enter instead
 /arc draft           # shortcut for /arc hydrate draft
 /arc replenish 1200  # transcript-line budget for the handoff packet
+/arc continuity 300  # si.md/tl.md line budget for the packet
 /arc instructions 300 # AGENTS.md/agent.md/CLAUDE.md line budget for the packet
 /arc off             # disable ARC
 /arc on              # enable ARC
@@ -64,6 +65,13 @@ The extension watches Pi context usage at `turn_end`. If the current context is 
 5. starts a new Pi session with the old session recorded as parent;
 6. either auto-submits the ARC packet in the replacement session (`/arc hydrate auto`) or places it in the editor for manual review (`/arc hydrate draft`).
 
+ARC also copies optional continuity files from the current working directory before transcript content:
+
+- `si.md` is for current session instructions: behavior, constraints, and fallback rules for this run.
+- `tl.md` is for current task state: a durable human-readable ledger when todo state alone is not enough or when other agents/tools need the same task context.
+
+These files are included within the `/arc continuity <lines>` budget and appear before project instruction files and recent transcript in the packet. They are intentionally separate from `AGENTS.md`/`CLAUDE.md`: those files are durable project defaults, while `si.md` and `tl.md` are live continuity state for the current session/task.
+
 ARC also copies ancestor `AGENTS.md`, `agent.md`, `CLAUDE.md`, and `GEMINI.md`-style instruction files into the packet within the `/arc instructions <lines>` budget. Pi should reload supported files from the new session cwd as normal; including them in the packet makes the handoff explicit.
 
 For continuity, each packet includes `previous_session_file` when Pi exposes the prior session log path. The packet is intended to be authoritative for normal continuation, but it also tells the next assistant to inspect that session log before asking you to restate missing details.
@@ -97,6 +105,29 @@ scripts\arc-driver.bat "pi"
 ```
 
 The Windows driver uses `SendKeys`, mirroring the old Claude Code proof-of-concept. Native Pi support is preferred once the concept is proven.
+
+## Continuity files
+
+ARC supports two optional files in the current working directory:
+
+### `si.md` — session instructions
+
+Use `si.md` for instructions that apply to the current run, especially instructions that should survive an ARC refresh. Keep it compact and directive. Example:
+
+```md
+# Session Instructions
+
+Follow these unless overridden:
+- Treat this file as current session policy.
+- Treat tl.md or todo state as current task state.
+- If unsure, inspect previous_session_file before asking the user to restate context.
+```
+
+### `tl.md` — task ledger
+
+Use `tl.md` when the active task needs a durable human-readable ledger: current goals, completed work, decisions, blocked items, and next steps. This is optional when Pi todo state is enough, but useful for long-running work, cross-agent workflows, or tasks that need richer prose than a checklist.
+
+ARC places `si.md` before `tl.md` in refresh packets so the new session sees session policy before task state. Missing files are ignored.
 
 ## Context recommendations
 

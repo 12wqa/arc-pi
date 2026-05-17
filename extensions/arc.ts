@@ -23,6 +23,7 @@ const INSTRUCTION_FILE_NAMES = [
 	".agent.md",
 	".claude.md",
 ];
+const CONTINUITY_FILE_NAMES = ["si.md", "tl.md"];
 
 const DEFAULTS = {
 	mode: "practical" as ArcMode,
@@ -30,6 +31,7 @@ const DEFAULTS = {
 	practicalWindowTokens: 200_000,
 	maxRecentMessages: 20,
 	replenishLines: 1_200,
+	continuityFileLines: 300,
 	instructionFileLines: 300,
 	hydrationMode: "auto" as HydrationMode,
 	auto: true,
@@ -45,6 +47,7 @@ type ArcState = {
 	practicalWindowTokens: number;
 	maxRecentMessages: number;
 	replenishLines: number;
+	continuityFileLines: number;
 	instructionFileLines: number;
 	hydrationMode: HydrationMode;
 	auto: boolean;
@@ -69,6 +72,7 @@ type RestartPacketInput = {
 	reason: string;
 	createdAt: string;
 	stateSnapshot: ArcState;
+	continuityFiles: InstructionFile[];
 	instructionFiles: InstructionFile[];
 	recentMessages: CleanMessage[];
 };
@@ -126,6 +130,9 @@ function sanitizeState(input: unknown): ArcState | null {
 	}
 	if (typeof raw.replenishLines === "number" && raw.replenishLines >= 1) {
 		state.replenishLines = Math.floor(raw.replenishLines);
+	}
+	if (typeof raw.continuityFileLines === "number" && raw.continuityFileLines >= 0) {
+		state.continuityFileLines = Math.floor(raw.continuityFileLines);
 	}
 	if (typeof raw.instructionFileLines === "number" && raw.instructionFileLines >= 0) {
 		state.instructionFileLines = Math.floor(raw.instructionFileLines);
@@ -375,6 +382,27 @@ function ancestorDirs(cwd: string): string[] {
 	return dirs.reverse();
 }
 
+async function collectContinuityFiles(cwd: string, maxTotalLines: number): Promise<InstructionFile[]> {
+	if (maxTotalLines <= 0) return [];
+	let remaining = Math.floor(maxTotalLines);
+	const files: InstructionFile[] = [];
+	for (const name of CONTINUITY_FILE_NAMES) {
+		if (remaining <= 0) return files;
+		const path = join(cwd, name);
+		try {
+			const raw = await readFile(path, "utf8");
+			const limited = limitHeadLines(redact(raw), remaining);
+			if (limited.text.trim()) {
+				files.push({ path, content: limited.text, omittedLines: limited.omittedLines });
+				remaining -= limited.text.split("\n").length;
+			}
+		} catch {
+			// Missing/unreadable continuity files are normal; keep rollover fast.
+		}
+	}
+	return files;
+}
+
 async function collectInstructionFiles(cwd: string, maxTotalLines: number): Promise<InstructionFile[]> {
 	if (maxTotalLines <= 0) return [];
 	let remaining = Math.floor(maxTotalLines);
@@ -416,6 +444,7 @@ function renderPacket(input: RestartPacketInput): string {
 		`arc_window_tokens: ${input.stateSnapshot.practicalWindowTokens}`,
 		`arc_recent_messages: ${input.stateSnapshot.maxRecentMessages}`,
 		`arc_replenish_lines: ${input.stateSnapshot.replenishLines}`,
+		`arc_continuity_file_lines: ${input.stateSnapshot.continuityFileLines}`,
 		`arc_instruction_file_lines: ${input.stateSnapshot.instructionFileLines}`,
 		`arc_hydration_mode: ${input.stateSnapshot.hydrationMode}`,
 		`reason: ${input.reason}`,
@@ -427,9 +456,18 @@ function renderPacket(input: RestartPacketInput): string {
 		"- Preserve active goals, decisions, file paths, failing/passing tests, and next steps.",
 		"- If important context appears missing, inspect previous_session_file before asking the user to restate it.",
 		"- Treat this as a fresh physical session within the same logical ARC context.",
+		"- Apply continuity files included below before relying on transcript context: si.md is current session policy; tl.md is current task state when present.",
 		"- Respect project instruction files included below; Pi also reloads instruction files from the new session cwd.",
 		"",
 	);
+	if (input.continuityFiles.length > 0) {
+		lines.push("Continuity files:");
+		for (const file of input.continuityFiles) {
+			lines.push(`\n--- continuity:${file.path} ---`, file.content);
+			if (file.omittedLines > 0) lines.push(`[ARC omitted ${file.omittedLines.toLocaleString()} additional continuity-file line${file.omittedLines === 1 ? "" : "s"}]`);
+		}
+		lines.push("");
+	}
 	if (input.instructionFiles.length > 0) {
 		lines.push("Project instruction files:");
 		for (const file of input.instructionFiles) {
@@ -463,6 +501,7 @@ function parseArcPacketState(text: string): Partial<ArcState> | null {
 	const window = Number.parseInt(packetField(text, "arc_window_tokens") ?? "", 10);
 	const recent = Number.parseInt(packetField(text, "arc_recent_messages") ?? "", 10);
 	const replenish = Number.parseInt(packetField(text, "arc_replenish_lines") ?? "", 10);
+	const continuityLines = Number.parseInt(packetField(text, "arc_continuity_file_lines") ?? "", 10);
 	const instructionLines = Number.parseInt(packetField(text, "arc_instruction_file_lines") ?? "", 10);
 	const hydrationMode = packetField(text, "arc_hydration_mode");
 	if (contextId) parsed.contextId = contextId;
@@ -472,6 +511,7 @@ function parseArcPacketState(text: string): Partial<ArcState> | null {
 	if (Number.isFinite(window) && window > 0) parsed.practicalWindowTokens = window;
 	if (Number.isFinite(recent) && recent > 0) parsed.maxRecentMessages = recent;
 	if (Number.isFinite(replenish) && replenish > 0) parsed.replenishLines = replenish;
+	if (Number.isFinite(continuityLines) && continuityLines >= 0) parsed.continuityFileLines = continuityLines;
 	if (Number.isFinite(instructionLines) && instructionLines >= 0) parsed.instructionFileLines = instructionLines;
 	if (hydrationMode === "auto" || hydrationMode === "draft") parsed.hydrationMode = hydrationMode;
 	return parsed;
@@ -518,6 +558,7 @@ function statusText(state: ArcState, usage?: ContextUsageLike, model?: unknown):
 		`Practical window: ${state.practicalWindowTokens.toLocaleString()} tokens`,
 		`Max recent messages in packet: ${state.maxRecentMessages}`,
 		`Replenish transcript budget: ${state.replenishLines.toLocaleString()} lines`,
+		`Continuity-file budget: ${state.continuityFileLines.toLocaleString()} lines`,
 		`Instruction-file budget: ${state.instructionFileLines.toLocaleString()} lines`,
 		`Hydration mode: ${state.hydrationMode}`,
 		`Pending: ${state.manualPending ? "manual" : state.thresholdPending ? "threshold" : "none"}`,
@@ -590,6 +631,7 @@ function debugText(state: ArcState, usage?: ContextUsageLike, model?: unknown, r
 		`    auto: ${state.auto}`,
 		`    practicalWindowTokens: ${state.practicalWindowTokens.toLocaleString()}`,
 		`    replenishLines: ${state.replenishLines.toLocaleString()}`,
+		`    continuityFileLines: ${state.continuityFileLines.toLocaleString()}`,
 		`    instructionFileLines: ${state.instructionFileLines.toLocaleString()}`,
 		`    hydrationMode: ${state.hydrationMode}`,
 		`    model/context window used for recommendation: ${contextWindow == null ? "unknown" : contextWindow.toLocaleString()}`,
@@ -626,6 +668,7 @@ function parseArcCommand(args: string): { action: string; threshold?: number; va
 	}
 	if (head === "window" && parts[1]) return { action: "window", value: parts[1] };
 	if ((head === "replenish" || head === "replenish-lines") && parts[1]) return { action: "replenish", value: parts[1] };
+	if ((head === "continuity" || head === "continuity-lines") && parts[1]) return { action: "continuity", value: parts[1] };
 	if ((head === "instructions" || head === "instruction-lines") && parts[1]) return { action: "instructions", value: parts[1] };
 	if (head === "recent" && parts[1]) return { action: "recent", value: parts[1] };
 	const threshold = parseThreshold(head);
@@ -688,6 +731,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 			const contextId = state.contextId ?? `arc_${randomUUID()}`;
 			const stateSnapshot = { ...state, contextId };
 			const recentMessages = capMessagesByTailLines(getRecentCleanMessages(branch, state.maxRecentMessages), state.replenishLines);
+			const continuityFiles = await collectContinuityFiles(ctx.cwd, state.continuityFileLines);
 			const instructionFiles = await collectInstructionFiles(ctx.cwd, state.instructionFileLines);
 			const parentSession = oldSessionFile;
 			const createdAt = new Date().toISOString();
@@ -713,6 +757,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				reason,
 				createdAt,
 				stateSnapshot,
+				continuityFiles,
 				instructionFiles,
 				recentMessages,
 			});
@@ -820,7 +865,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("arc", {
-		description: "ARC safe-boundary session refresh: status, debug, check, now, recommend, hydrate, replenish, on, off",
+		description: "ARC safe-boundary session refresh: status, debug, check, now, recommend, hydrate, replenish, continuity, on, off",
 		handler: async (args, ctx) => {
 			const parsed = parseArcCommand(args);
 			if (parsed.action === "status") {
@@ -936,6 +981,18 @@ export default function arcExtension(pi: ExtensionAPI) {
 				show(`ARC replenish transcript budget set to ${n.toLocaleString()} lines.`);
 				return;
 			}
+			if (parsed.action === "continuity" && parsed.value) {
+				const n = Number.parseInt(parsed.value.replace(/,/g, ""), 10);
+				if (!Number.isFinite(n) || n < 0) {
+					show("Usage: /arc continuity <continuity-file-lines>");
+					return;
+				}
+				state = { ...state, continuityFileLines: n };
+				persistState();
+				updateStatus(ctx);
+				show(`ARC continuity-file budget set to ${n.toLocaleString()} lines.`);
+				return;
+			}
 			if (parsed.action === "instructions" && parsed.value) {
 				const n = Number.parseInt(parsed.value.replace(/,/g, ""), 10);
 				if (!Number.isFinite(n) || n < 0) {
@@ -964,7 +1021,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				await performRollover(ctx, "manual");
 				return;
 			}
-			show("Usage: /arc [status|debug|check|recommend|now|35%|threshold 35%|on|off|auto|manual|hydrate auto|draft|practical|full|window <tokens>|replenish <lines>|instructions <lines>|recent <count>]");
+			show("Usage: /arc [status|debug|check|recommend|now|35%|threshold 35%|on|off|auto|manual|hydrate auto|draft|practical|full|window <tokens>|replenish <lines>|continuity <lines>|instructions <lines>|recent <count>]");
 		},
 	});
 
