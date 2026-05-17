@@ -13,6 +13,7 @@
   "type": "module",
   "files": [
     "extensions",
+    "scripts",
     "docs",
     "README.md",
     "LICENSE"

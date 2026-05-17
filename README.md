@@ -55,7 +55,7 @@ ARC A ▰▰▰▱▱▱▱▱ 14k/40k
 
 ## How it works
 
-The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, ARC drafts `/arc-rollover threshold` in the editor and notifies you to press Enter. Pi currently exposes session replacement (`ctx.newSession`) only to command handlers, not passive event hooks, so event-driven detection cannot directly switch sessions by itself. Explicit command paths such as `/arc check`, `/arc now`, or `/arc threshold 35%` can refresh immediately. The rollover then:
+The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, ARC drafts `/arc-rollover threshold` in the editor, writes `~/.pi/agent/arc/trigger.json`, and notifies you to press Enter. Pi currently exposes session replacement (`ctx.newSession`) only to command handlers, not passive event hooks, so event-driven detection cannot directly switch sessions by itself. Explicit command paths such as `/arc check`, `/arc now`, or `/arc threshold 35%` can refresh immediately. The rollover then:
 
 1. waits for Pi to be idle;
 2. builds a deterministic restart packet from recent non-system session messages;
@@ -67,6 +67,34 @@ The extension watches Pi context usage at `turn_end`. If the current context is 
 ARC also copies ancestor `AGENTS.md`, `agent.md`, `CLAUDE.md`, and `GEMINI.md`-style instruction files into the packet within the `/arc instructions <lines>` budget. Pi should reload supported files from the new session cwd as normal; including them in the packet makes the handoff explicit.
 
 This uses public Pi extension APIs rather than monkeypatching Pi internals.
+
+## Experimental autodriver
+
+Until Pi has native queued-command/session-replacement support from passive hooks, ARC includes proof-of-concept drivers that submit the drafted rollover command externally.
+
+### tmux / Linux
+
+Run Pi in one tmux pane. In that Pi pane, get the target pane id:
+
+```bash
+tmux display-message -p '#{pane_id}'
+```
+
+In another pane:
+
+```bash
+arc-pi/scripts/arc-driver-tmux.sh %12
+```
+
+By default the driver watches `~/.pi/agent/arc/trigger.json` and presses Enter in the target pane after ARC drafts `/arc-rollover threshold`. This is intentionally simple and experimental.
+
+### Windows
+
+```bat
+scripts\arc-driver.bat "pi"
+```
+
+The Windows driver uses `SendKeys`, mirroring the old Claude Code proof-of-concept. Native Pi support is preferred once the concept is proven.
 
 ## Context recommendations
 

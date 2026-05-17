@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,8 @@ import { randomUUID } from "node:crypto";
 const EXTENSION_TYPE = "pi-arc";
 const STATE_TYPE = "pi-arc-state";
 const INTERNAL_ROLLOVER_COMMAND = "arc-rollover";
+const ARC_RUNTIME_DIR = join(homedir(), ".pi", "agent", "arc");
+const ARC_TRIGGER_PATH = join(ARC_RUNTIME_DIR, "trigger.json");
 const INSTRUCTION_FILE_NAMES = [
 	"AGENTS.md",
 	"AGENT.md",
@@ -474,7 +477,20 @@ function parseArcPacketState(text: string): Partial<ArcState> | null {
 }
 
 function packetPathFor(newSessionId: string): string {
-	return join(homedir(), ".pi", "agent", "arc", "packets", `${newSessionId}.md`);
+	return join(ARC_RUNTIME_DIR, "packets", `${newSessionId}.md`);
+}
+
+function writeTriggerFile(input: { command: string; reason: string; cwd: string; tokens: number; thresholdTokens?: number | null; threshold: number }) {
+	try {
+		mkdirSync(ARC_RUNTIME_DIR, { recursive: true });
+		writeFileSync(ARC_TRIGGER_PATH, JSON.stringify({
+			id: randomUUID(),
+			createdAt: new Date().toISOString(),
+			...input,
+		}, null, 2));
+	} catch {
+		// Trigger files are a best-effort bridge for external drivers.
+	}
 }
 
 function getLatestStateFromBranch(branch: readonly any[]): ArcState | null {
@@ -633,17 +649,27 @@ export default function arcExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus(EXTENSION_TYPE, formatStatusLine(state, ctx.getContextUsage()));
 	}
 
-	function adviseThresholdRollover(ctx: Pick<ExtensionContext, "ui">, usage: ContextUsageLike, reason = "threshold") {
+	function adviseThresholdRollover(ctx: Pick<ExtensionContext, "ui" | "cwd">, usage: ContextUsageLike, reason = "threshold") {
 		if (rolloverQueued || state.mode === "off" || !state.auto || usage.tokens == null) return false;
 		rolloverQueued = true;
 		state = { ...state, thresholdPending: true, lastObservedTokens: usage.tokens };
 		persistState();
 		// Extension-originated sendUserMessage intentionally bypasses slash-command
 		// handling, so do not try to enqueue /arc-rollover here. Event hooks do not
-		// expose ctx.newSession(); draft the command instead and let the next Enter
-		// run it through Pi's command path.
-		ctx.ui.setEditorText(`/${INTERNAL_ROLLOVER_COMMAND} ${reason}`);
-		ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; /${INTERNAL_ROLLOVER_COMMAND} ${reason} is drafted. Press Enter to refresh.`, "warning");
+		// expose ctx.newSession(); draft the command and write a trigger for an
+		// optional external driver to submit through Pi's command path.
+		const command = `/${INTERNAL_ROLLOVER_COMMAND} ${reason}`;
+		const window = effectiveWindow(state, usage.contextWindow);
+		writeTriggerFile({
+			command,
+			reason,
+			cwd: ctx.cwd,
+			tokens: usage.tokens,
+			thresholdTokens: window ? Math.floor(window * state.threshold) : null,
+			threshold: state.threshold,
+		});
+		ctx.ui.setEditorText(command);
+		ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; ${command} is drafted. Press Enter to refresh, or run an ARC driver.`, "warning");
 		return true;
 	}
 
