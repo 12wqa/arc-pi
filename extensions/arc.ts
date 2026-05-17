@@ -425,6 +425,7 @@ function renderPacket(input: RestartPacketInput): string {
 		"- Continue from this packet as the authoritative handoff state.",
 		"- Do not repeat completed tool calls unless the user asks or verification is required.",
 		"- Preserve active goals, decisions, file paths, failing/passing tests, and next steps.",
+		"- If important context appears missing, inspect previous_session_file before asking the user to restate it.",
 		"- Treat this as a fresh physical session within the same logical ARC context.",
 		"- Respect project instruction files included below; Pi also reloads instruction files from the new session cwd.",
 		"",

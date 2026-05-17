@@ -66,6 +66,8 @@ The extension watches Pi context usage at `turn_end`. If the current context is 
 
 ARC also copies ancestor `AGENTS.md`, `agent.md`, `CLAUDE.md`, and `GEMINI.md`-style instruction files into the packet within the `/arc instructions <lines>` budget. Pi should reload supported files from the new session cwd as normal; including them in the packet makes the handoff explicit.
 
+For continuity, each packet includes `previous_session_file` when Pi exposes the prior session log path. The packet is intended to be authoritative for normal continuation, but it also tells the next assistant to inspect that session log before asking you to restate missing details.
+
 This uses public Pi extension APIs rather than monkeypatching Pi internals.
 
 ## Experimental autodriver
