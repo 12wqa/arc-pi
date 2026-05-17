@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -350,6 +350,7 @@ function statusText(state: ArcState, usage?: ContextUsageLike, model?: unknown):
 		: `Current usage: ${usage.tokens.toLocaleString()} tokens${window ? ` / ${window.toLocaleString()} ARC window` : ""}`;
 	return [
 		`ARC: ${state.mode === "off" ? "disabled" : state.auto ? "enabled" : "manual-only"}`,
+		`Status line: ${formatStatusLine(state, usage) ?? "hidden"}`,
 		`Mode: ${state.mode}`,
 		`Threshold: ${pct(state.threshold)}${thresholdTokens ? ` (~${thresholdTokens.toLocaleString()} tokens)` : ""}`,
 		`Practical window: ${state.practicalWindowTokens.toLocaleString()} tokens`,
@@ -361,6 +362,28 @@ function statusText(state: ArcState, usage?: ContextUsageLike, model?: unknown):
 		model ? formatRecommendation(model, usage) : undefined,
 		state.lastPacketPath ? `Last packet: ${state.lastPacketPath}` : undefined,
 	].filter((line) => line !== undefined).join("\n");
+}
+
+function compactTokens(tokens: number): string {
+	if (tokens >= 1_000_000) return `${Number.parseFloat((tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1))}M`;
+	if (tokens >= 1_000) return `${Number.parseFloat((tokens / 1_000).toFixed(tokens >= 100_000 ? 0 : 1))}k`;
+	return `${tokens}`;
+}
+
+function formatStatusLine(state: ArcState, usage?: ContextUsageLike): string | undefined {
+	if (state.mode === "off") return undefined;
+	const mode = state.auto ? "A" : "M";
+	const window = effectiveWindow(state, usage?.contextWindow);
+	const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
+	const tokens = usage?.tokens ?? state.lastObservedTokens;
+	if (!thresholdTokens || tokens == null) return `ARC ${mode} ${state.mode} ${pct(state.threshold)}`;
+
+	const ratio = Math.max(0, tokens / thresholdTokens);
+	const width = 8;
+	const filled = Math.min(width, Math.max(0, Math.round(ratio * width)));
+	const bar = `${"▰".repeat(filled)}${"▱".repeat(width - filled)}`;
+	const suffix = ratio >= 1 ? " !" : state.cooldownRemaining > 0 ? ` ↻${state.cooldownRemaining}` : "";
+	return `ARC ${mode} ${bar} ${compactTokens(tokens)}/${compactTokens(thresholdTokens)}${suffix}`;
 }
 
 function parseArcCommand(args: string): { action: string; threshold?: number; value?: string } {
@@ -395,6 +418,11 @@ export default function arcExtension(pi: ExtensionAPI) {
 
 	function show(content: string) {
 		pi.sendMessage({ customType: EXTENSION_TYPE, content, display: true });
+	}
+
+	function updateStatus(ctx: Pick<ExtensionContext, "hasUI" | "ui" | "getContextUsage">) {
+		if (!ctx.hasUI) return;
+		ctx.ui.setStatus(EXTENSION_TYPE, formatStatusLine(state, ctx.getContextUsage()));
 	}
 
 	async function performRollover(ctx: ExtensionCommandContext, reason: string) {
@@ -481,27 +509,36 @@ export default function arcExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		state = getLatestStateFromBranch(ctx.sessionManager.getBranch() as readonly any[]) ?? freshState();
-		if (ctx.hasUI) {
-			ctx.ui.setStatus(EXTENSION_TYPE, state.mode === "off" ? undefined : `ARC ${state.mode} ${pct(state.threshold)}`);
-		}
+		updateStatus(ctx);
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
 		if (state.cooldownRemaining > 0) {
 			state = { ...state, cooldownRemaining: state.cooldownRemaining - 1 };
 			persistState();
+			updateStatus(ctx);
 			return;
 		}
-		if (!state.auto || state.mode === "off" || rolloverQueued) return;
+		if (!state.auto || state.mode === "off" || rolloverQueued) {
+			updateStatus(ctx);
+			return;
+		}
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens == null) return;
+		if (!usage || usage.tokens == null) {
+			updateStatus(ctx);
+			return;
+		}
 		const window = effectiveWindow(state, usage.contextWindow);
-		if (!window) return;
+		if (!window) {
+			updateStatus(ctx);
+			return;
+		}
 		const thresholdTokens = Math.floor(window * state.threshold);
 		const wasAbove = state.lastObservedTokens != null && state.lastObservedTokens >= thresholdTokens;
 		const isAbove = usage.tokens >= thresholdTokens;
 		state = { ...state, lastObservedTokens: usage.tokens, thresholdPending: isAbove };
 		persistState();
+		updateStatus(ctx);
 		if (!isAbove || wasAbove) return;
 		rolloverQueued = true;
 		ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; queuing safe-boundary refresh.`, "info");
@@ -523,39 +560,42 @@ export default function arcExtension(pi: ExtensionAPI) {
 			if (parsed.action === "disable") {
 				state = { ...state, mode: "off", manualPending: false, thresholdPending: false };
 				persistState();
-				ctx.ui.setStatus(EXTENSION_TYPE, undefined);
+				updateStatus(ctx);
 				show("ARC disabled. Pi default compaction remains available.");
 				return;
 			}
 			if (parsed.action === "enable") {
 				state = { ...state, mode: state.mode === "off" ? "practical" : state.mode, auto: true };
 				persistState();
-				ctx.ui.setStatus(EXTENSION_TYPE, `ARC ${state.mode} ${pct(state.threshold)}`);
+				updateStatus(ctx);
 				show("ARC enabled.");
 				return;
 			}
 			if (parsed.action === "mode" && (parsed.value === "practical" || parsed.value === "full")) {
 				state = { ...state, mode: parsed.value };
 				persistState();
-				ctx.ui.setStatus(EXTENSION_TYPE, `ARC ${state.mode} ${pct(state.threshold)}`);
+				updateStatus(ctx);
 				show(`ARC mode set to ${parsed.value}.`);
 				return;
 			}
 			if (parsed.action === "manual") {
 				state = { ...state, auto: false };
 				persistState();
+				updateStatus(ctx);
 				show("ARC automatic refresh disabled; /arc now still works.");
 				return;
 			}
 			if (parsed.action === "auto") {
 				state = { ...state, auto: true };
 				persistState();
+				updateStatus(ctx);
 				show("ARC automatic refresh enabled.");
 				return;
 			}
 			if (parsed.action === "threshold" && parsed.threshold) {
 				state = { ...state, threshold: parsed.threshold, thresholdPending: false };
 				persistState();
+				updateStatus(ctx);
 				show([
 					`ARC threshold set to ${pct(parsed.threshold)}. Refresh will wait for a safe boundary.`,
 					"",
@@ -571,6 +611,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				}
 				state = { ...state, practicalWindowTokens: n, thresholdPending: false };
 				persistState();
+				updateStatus(ctx);
 				show(`ARC practical window set to ${n.toLocaleString()} tokens.`);
 				return;
 			}
@@ -582,6 +623,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				}
 				state = { ...state, maxRecentMessages: n };
 				persistState();
+				updateStatus(ctx);
 				show(`ARC packets will include the last ${n} clean messages.`);
 				return;
 			}

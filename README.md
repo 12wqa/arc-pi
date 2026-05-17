@@ -32,6 +32,20 @@ pi -e /path/to/arc-pi
 /arc recent 20       # recent clean messages to include in packet
 ```
 
+## Status-line display
+
+When ARC is enabled, the Pi status line shows a compact graphical progress bar toward the next refresh threshold:
+
+```text
+ARC A ▰▰▰▱▱▱▱▱ 14k/40k
+```
+
+- `A` = automatic threshold refresh enabled
+- `M` = manual-only mode
+- filled blocks = current context progress toward the ARC refresh target
+- `!` appears when the configured threshold has been crossed
+- `↻N` appears during post-refresh cooldown turns
+
 ## How it works
 
 The extension watches Pi context usage at `turn_end`. When the configured threshold is crossed, it queues rollover as a follow-up command so the current agent work can finish first. The rollover then:
