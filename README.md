@@ -20,7 +20,7 @@ pi -e /path/to/arc-pi
 /arc                 # status
 /arc debug           # print raw ctx.getContextUsage() and ARC threshold math
 /arc check           # evaluate current context and queue refresh if over threshold
-/arc now             # create a safe-boundary ARC handoff session now
+/arc now             # create a safe-boundary ARC handoff draft in a new session
 /arc recommend       # show suggested settings for the current model
 /arc 35%             # set refresh threshold and show current-model recommendation
 /arc threshold 35%   # same as above; queues refresh if current context is already over threshold
@@ -57,7 +57,7 @@ The extension watches Pi context usage at `turn_end`. If the current context is 
 3. redacts credential-like strings;
 4. writes the packet to `~/.pi/agent/arc/packets/`;
 5. starts a new Pi session with the old session recorded as parent;
-6. seeds the new session with the ARC packet as the first user message.
+6. places the ARC packet in the editor so you can inspect/edit and press Enter to hydrate the new session.
 
 This uses public Pi extension APIs rather than monkeypatching Pi internals.
 
@@ -81,7 +81,7 @@ ARC packets exclude system prompts and redact common API-key/token/secret shapes
 
 ### `/arc now` exits instead of staying in Pi
 
-That is not the intended behavior. `/arc now` should switch to a new Pi session and keep the TUI open. If your terminal returns to the shell, restart Pi and use `/resume`; the ARC-created session should be available because the packet is written before session replacement completes. Packet audit copies live under:
+That is not the intended behavior. `/arc now` should switch to a new Pi session with the ARC packet drafted in the editor and keep the TUI open. If your terminal returns to the shell, restart Pi and use `/resume`. Packet audit copies live under:
 
 ```text
 ~/.pi/agent/arc/packets/

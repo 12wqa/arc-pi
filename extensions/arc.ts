@@ -503,7 +503,6 @@ export default function arcExtension(pi: ExtensionAPI) {
 			const recentMessages = getRecentCleanMessages(branch, state.maxRecentMessages);
 			const parentSession = oldSessionFile;
 			const createdAt = new Date().toISOString();
-			let packetPath: string | undefined;
 
 			if (recentMessages.length === 0) {
 				show("ARC rollover skipped: no conversation messages found to hydrate the new session.");
@@ -511,53 +510,43 @@ export default function arcExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			// Generate the packet before session replacement. This avoids mutating the
+			// replacement SessionManager inside ctx.newSession({ setup }), which can
+			// surface as a fatal interactive runtime error in some Pi builds.
+			const newSessionId = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14) + `_arc_${randomUUID().slice(0, 8)}`;
+			const packet = renderPacket({
+				contextId,
+				oldSessionId,
+				oldSessionFile,
+				newSessionId,
+				cwd: ctx.cwd,
+				platform: "pi",
+				threshold: state.threshold,
+				reason,
+				createdAt,
+				recentMessages,
+			});
+			const packetPath = packetPathFor(newSessionId);
+			await mkdir(join(homedir(), ".pi", "agent", "arc", "packets"), { recursive: true });
+			await writeFile(packetPath, packet, "utf8");
+
 			state = {
 				...state,
 				contextId,
 				manualPending: reason === "manual",
 				thresholdPending: reason !== "manual",
+				lastPacketPath: packetPath,
+				lastRolloverAt: createdAt,
 			};
 			persistState();
 
 			const result = await ctx.newSession({
 				parentSession,
-				setup: async (sessionManager: any) => {
-					const newSessionId = sessionManager.getSessionId?.() ?? `arc_${randomUUID()}`;
-					const packet = renderPacket({
-						contextId,
-						oldSessionId,
-						oldSessionFile,
-						newSessionId,
-						cwd: ctx.cwd,
-						platform: "pi",
-						threshold: state.threshold,
-						reason,
-						createdAt,
-						recentMessages,
-					});
-					packetPath = packetPathFor(newSessionId);
-					await mkdir(join(homedir(), ".pi", "agent", "arc", "packets"), { recursive: true });
-					await writeFile(packetPath, packet, "utf8");
-					sessionManager.appendMessage({
-						role: "user",
-						content: [{ type: "text", text: packet }],
-						timestamp: Date.now(),
-					});
-					sessionManager.appendCustomEntry?.(STATE_TYPE, {
-						...state,
-						manualPending: false,
-						thresholdPending: false,
-						lastObservedTokens: null,
-						cooldownRemaining: state.cooldownTurns,
-						lastPacketPath: packetPath,
-						lastRolloverAt: createdAt,
-						contextId,
-					});
-				},
 				withSession: async (replacementCtx) => {
-					// Keep this deliberately UI-only. Injecting another custom message from
-					// the replacement callback can race some interactive session-rebind paths.
-					replacementCtx.ui.notify(`ARC refreshed into a new session${packetPath ? ` (${packetPath})` : ""}.`, "info");
+					// Conservative handoff: put the packet in the editor instead of
+					// auto-submitting it. The user can inspect/edit and press Enter.
+					replacementCtx.ui.setEditorText(packet);
+					replacementCtx.ui.notify(`ARC handoff ready. Packet: ${packetPath}. Press Enter to hydrate.`, "info");
 				},
 			});
 
