@@ -127,7 +127,7 @@ Prefer changing threshold first for refresh timing. Change `window` when a whole
 
 ## Extension behavior
 
-The extension currently embeds a small rule-based recommender matching the table above. It is intentionally conservative and offline. It also supports auto-hydration (`/arc hydrate auto`) so threshold refreshes can immediately continue in the replacement session; use `/arc hydrate draft` if you want to inspect/edit each packet before submitting. When the user runs:
+The extension currently embeds a small rule-based recommender matching the table above. It is intentionally conservative and offline. It also supports auto-hydration (`/arc hydrate auto`) once a refresh command is running, so `/arc now`, `/arc check`, and over-threshold `/arc <percent>` can immediately continue in the replacement session. Passive `turn_end` detection can only draft `/arc-rollover threshold` because Pi currently exposes session replacement only to command handlers. Use `/arc hydrate draft` if you want to inspect/edit each packet before submitting. When the user runs:
 
 ```text
 /arc

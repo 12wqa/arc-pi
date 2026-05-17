@@ -633,13 +633,17 @@ export default function arcExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus(EXTENSION_TYPE, formatStatusLine(state, ctx.getContextUsage()));
 	}
 
-	function queueThresholdRollover(ctx: Pick<ExtensionContext, "ui">, usage: ContextUsageLike, reason = "threshold") {
+	function adviseThresholdRollover(ctx: Pick<ExtensionContext, "ui">, usage: ContextUsageLike, reason = "threshold") {
 		if (rolloverQueued || state.mode === "off" || !state.auto || usage.tokens == null) return false;
 		rolloverQueued = true;
 		state = { ...state, thresholdPending: true, lastObservedTokens: usage.tokens };
 		persistState();
-		ctx.ui.notify(`ARC threshold is already crossed at ${usage.tokens.toLocaleString()} tokens; queuing safe-boundary refresh.`, "info");
-		pi.sendUserMessage(`/${INTERNAL_ROLLOVER_COMMAND} ${reason}`, { deliverAs: "followUp" });
+		// Extension-originated sendUserMessage intentionally bypasses slash-command
+		// handling, so do not try to enqueue /arc-rollover here. Event hooks do not
+		// expose ctx.newSession(); draft the command instead and let the next Enter
+		// run it through Pi's command path.
+		ctx.ui.setEditorText(`/${INTERNAL_ROLLOVER_COMMAND} ${reason}`);
+		ctx.ui.notify(`ARC threshold crossed at ${usage.tokens.toLocaleString()} tokens; /${INTERNAL_ROLLOVER_COMMAND} ${reason} is drafted. Press Enter to refresh.`, "warning");
 		return true;
 	}
 
@@ -782,10 +786,10 @@ export default function arcExtension(pi: ExtensionAPI) {
 		persistState();
 		updateStatus(ctx);
 		if (!isAbove) return;
-		// Safe-boundary policy: if we are over threshold at turn end, queue ARC.
-		// Do not require a fresh upward crossing; a session may already be over
-		// threshold when the extension is installed, reloaded, or reconfigured.
-		queueThresholdRollover(ctx, usage, "threshold");
+		// Safe-boundary policy: if we are over threshold at turn end, advise ARC.
+		// Event contexts cannot call ctx.newSession(), so this drafts the internal
+		// command for the user to submit through Pi's command path.
+		adviseThresholdRollover(ctx, usage, "threshold");
 	});
 
 	pi.registerCommand("arc", {
@@ -807,9 +811,9 @@ export default function arcExtension(pi: ExtensionAPI) {
 				const tokens = usage?.tokens ?? null;
 				const over = tokens != null && thresholdTokens != null && tokens >= thresholdTokens;
 				if (over && usage && tokens != null && state.auto && state.mode !== "off" && state.cooldownRemaining === 0) {
-					queueThresholdRollover(ctx, usage, "threshold");
 					updateStatus(ctx);
-					show(`ARC check: current context is over threshold (${tokens.toLocaleString()} >= ${thresholdTokens!.toLocaleString()}); refresh queued.`);
+					show(`ARC check: current context is over threshold (${tokens.toLocaleString()} >= ${thresholdTokens!.toLocaleString()}); refreshing now.`);
+					await performRollover(ctx, "threshold");
 					return;
 				}
 				show(debugText(state, usage, ctx.model, rolloverQueued));
@@ -870,17 +874,15 @@ export default function arcExtension(pi: ExtensionAPI) {
 				const window = effectiveWindow(state, usage?.contextWindow);
 				const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
 				const alreadyOverThreshold = Boolean(usage?.tokens != null && thresholdTokens && usage.tokens >= thresholdTokens);
-				if (alreadyOverThreshold && usage) {
-					queueThresholdRollover(ctx, usage, "threshold");
-				}
 				updateStatus(ctx);
 				show([
 					alreadyOverThreshold
-						? `ARC threshold set to ${pct(parsed.threshold)}. Current context is already over that threshold, so refresh has been queued for a safe boundary.`
+						? `ARC threshold set to ${pct(parsed.threshold)}. Current context is already over that threshold, so refreshing now.`
 						: `ARC threshold set to ${pct(parsed.threshold)}. Refresh will wait for a safe boundary.`,
 					"",
 					formatRecommendation(ctx.model, usage),
 				].join("\n"));
+				if (alreadyOverThreshold) await performRollover(ctx, "threshold");
 				return;
 			}
 			if (parsed.action === "window" && parsed.value) {

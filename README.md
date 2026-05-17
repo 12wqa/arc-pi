@@ -19,12 +19,12 @@ pi -e /path/to/arc-pi
 ```text
 /arc                 # status
 /arc debug           # print raw ctx.getContextUsage() and ARC threshold math
-/arc check           # evaluate current context and queue refresh if over threshold
+/arc check           # evaluate current context and refresh now if over threshold
 /arc now             # create a safe-boundary ARC refresh now
 /arc recommend       # show suggested settings for the current model
 /arc 35%             # set refresh threshold and show current-model recommendation
-/arc threshold 35%   # same as above; queues refresh if current context is already over threshold
-/arc auto            # enable automatic threshold refresh
+/arc threshold 35%   # same as above; refreshes now if current context is already over threshold
+/arc auto            # enable threshold detection/advisory at turn_end
 /arc manual          # disable automatic refresh; keep /arc now
 /arc hydrate auto    # auto-submit the packet in the new session (default)
 /arc hydrate draft   # draft the packet and wait for Enter instead
@@ -47,7 +47,7 @@ When ARC is enabled, the Pi status line shows a compact graphical progress bar t
 ARC A ▰▰▰▱▱▱▱▱ 14k/40k
 ```
 
-- `A` = automatic threshold refresh enabled
+- `A` = automatic threshold detection enabled
 - `M` = manual-only mode
 - filled blocks = current context progress toward the ARC refresh target
 - `!` appears when the configured threshold has been crossed
@@ -55,7 +55,7 @@ ARC A ▰▰▰▱▱▱▱▱ 14k/40k
 
 ## How it works
 
-The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, it queues rollover as a follow-up command so the current agent work can finish first. This does not require a fresh upward crossing; sessions that are already over threshold after install, reload, or reconfiguration are eligible for refresh. The rollover then:
+The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, ARC drafts `/arc-rollover threshold` in the editor and notifies you to press Enter. Pi currently exposes session replacement (`ctx.newSession`) only to command handlers, not passive event hooks, so event-driven detection cannot directly switch sessions by itself. Explicit command paths such as `/arc check`, `/arc now`, or `/arc threshold 35%` can refresh immediately. The rollover then:
 
 1. waits for Pi to be idle;
 2. builds a deterministic restart packet from recent non-system session messages;
@@ -94,7 +94,7 @@ That is not the intended behavior. `/arc now` should switch to a new Pi session 
 ~/.pi/agent/arc/packets/
 ```
 
-If it keeps happening, disable automatic ARC while debugging:
+If it keeps happening, disable threshold detection while debugging:
 
 ```text
 /arc manual
