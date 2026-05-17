@@ -19,6 +19,7 @@ pi -e /path/to/arc-pi
 ```text
 /arc                 # status
 /arc debug           # print raw ctx.getContextUsage() and ARC threshold math
+/arc check           # evaluate current context and queue refresh if over threshold
 /arc now             # create a safe-boundary ARC handoff session now
 /arc recommend       # show suggested settings for the current model
 /arc 35%             # set refresh threshold and show current-model recommendation
@@ -49,7 +50,7 @@ ARC A ▰▰▰▱▱▱▱▱ 14k/40k
 
 ## How it works
 
-The extension watches Pi context usage at `turn_end`. When the configured threshold is crossed, it queues rollover as a follow-up command so the current agent work can finish first. The rollover then:
+The extension watches Pi context usage at `turn_end`. If the current context is over the configured threshold at that safe boundary, it queues rollover as a follow-up command so the current agent work can finish first. This does not require a fresh upward crossing; sessions that are already over threshold after install, reload, or reconfiguration are eligible for refresh. The rollover then:
 
 1. waits for Pi to be idle;
 2. builds a deterministic restart packet from recent non-system session messages;

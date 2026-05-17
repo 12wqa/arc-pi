@@ -386,19 +386,40 @@ function formatStatusLine(state: ArcState, usage?: ContextUsageLike): string | u
 	return `ARC ${mode} ${bar} ${compactTokens(tokens)}/${compactTokens(thresholdTokens)}${suffix}`;
 }
 
+function formatUsagePercent(percent: number | null | undefined): string {
+	if (percent == null || !Number.isFinite(percent)) return "null";
+	// Pi currently reports percent as percentage points (e.g. 60.31), while
+	// older/internal callers may use a ratio (0.6031). Handle both.
+	const points = percent > 1 ? percent : percent * 100;
+	return `${Number.parseFloat(points.toFixed(points >= 10 ? 0 : 1))}%`;
+}
+
 function debugText(state: ArcState, usage?: ContextUsageLike, model?: unknown, rolloverQueued = false): string {
 	const contextWindow = contextWindowFor(model, usage);
 	const effective = effectiveWindow(state, usage?.contextWindow);
 	const thresholdTokens = effective ? Math.floor(effective * state.threshold) : null;
 	const tokens = usage?.tokens ?? null;
 	const over = tokens != null && thresholdTokens != null ? tokens >= thresholdTokens : null;
+	const blockedReason = state.mode === "off"
+		? "mode=off"
+		: !state.auto
+			? "auto=false"
+			: state.cooldownRemaining > 0
+				? `cooldown=${state.cooldownRemaining}`
+				: rolloverQueued
+					? "already queued"
+					: over === true
+						? "not blocked"
+						: over === false
+							? "below threshold"
+							: "usage unknown";
 	return [
 		"ARC debug:",
 		`  model: ${currentModelLabel(model)}`,
 		"  ctx.getContextUsage():",
 		`    tokens: ${tokens == null ? "null" : tokens.toLocaleString()}`,
 		`    contextWindow: ${usage?.contextWindow == null ? "undefined" : usage.contextWindow.toLocaleString()}`,
-		`    percent: ${usage?.percent == null ? "null" : `${Math.round(usage.percent * 100)}%`}`,
+		`    percent: ${formatUsagePercent(usage?.percent)}`,
 		"  ARC calculation:",
 		`    mode: ${state.mode}`,
 		`    auto: ${state.auto}`,
@@ -411,6 +432,7 @@ function debugText(state: ArcState, usage?: ContextUsageLike, model?: unknown, r
 		`    rolloverQueued: ${rolloverQueued}`,
 		`    thresholdPending: ${state.thresholdPending}`,
 		`    cooldownRemaining: ${state.cooldownRemaining}`,
+		`    queueBlockedBy: ${blockedReason}`,
 		`  statusLine: ${formatStatusLine(state, usage) ?? "hidden"}`,
 	].join("\n");
 }
@@ -427,6 +449,7 @@ function parseArcCommand(args: string): { action: string; threshold?: number; va
 	if (head === "now") return { action: "rollover", value: "manual" };
 	if (head === "recommend" || head === "recommended") return { action: "recommend" };
 	if (head === "debug" || head === "diagnose") return { action: "debug" };
+	if (head === "check" || head === "evaluate") return { action: "check" };
 	if ((head === "limit" || head === "threshold") && parts[1]) {
 		const threshold = parseThreshold(parts[1]);
 		return threshold ? { action: "threshold", threshold } : { action: "unknown" };
@@ -577,17 +600,19 @@ export default function arcExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const thresholdTokens = Math.floor(window * state.threshold);
-		const wasAbove = state.lastObservedTokens != null && state.lastObservedTokens >= thresholdTokens;
 		const isAbove = usage.tokens >= thresholdTokens;
 		state = { ...state, lastObservedTokens: usage.tokens, thresholdPending: isAbove };
 		persistState();
 		updateStatus(ctx);
-		if (!isAbove || wasAbove) return;
+		if (!isAbove) return;
+		// Safe-boundary policy: if we are over threshold at turn end, queue ARC.
+		// Do not require a fresh upward crossing; a session may already be over
+		// threshold when the extension is installed, reloaded, or reconfigured.
 		queueThresholdRollover(ctx, usage, "threshold");
 	});
 
 	pi.registerCommand("arc", {
-		description: "ARC safe-boundary session refresh: status, debug, now, recommend, 35%, on, off, practical, full",
+		description: "ARC safe-boundary session refresh: status, debug, check, now, recommend, 35%, on, off, practical, full",
 		handler: async (args, ctx) => {
 			const parsed = parseArcCommand(args);
 			if (parsed.action === "status") {
@@ -596,6 +621,21 @@ export default function arcExtension(pi: ExtensionAPI) {
 			}
 			if (parsed.action === "debug") {
 				show(debugText(state, ctx.getContextUsage(), ctx.model, rolloverQueued));
+				return;
+			}
+			if (parsed.action === "check") {
+				const usage = ctx.getContextUsage();
+				const window = effectiveWindow(state, usage?.contextWindow);
+				const thresholdTokens = window ? Math.floor(window * state.threshold) : null;
+				const tokens = usage?.tokens ?? null;
+				const over = tokens != null && thresholdTokens != null && tokens >= thresholdTokens;
+				if (over && usage && tokens != null && state.auto && state.mode !== "off" && state.cooldownRemaining === 0) {
+					queueThresholdRollover(ctx, usage, "threshold");
+					updateStatus(ctx);
+					show(`ARC check: current context is over threshold (${tokens.toLocaleString()} >= ${thresholdTokens!.toLocaleString()}); refresh queued.`);
+					return;
+				}
+				show(debugText(state, usage, ctx.model, rolloverQueued));
 				return;
 			}
 			if (parsed.action === "recommend") {
@@ -685,7 +725,7 @@ export default function arcExtension(pi: ExtensionAPI) {
 				await performRollover(ctx, "manual");
 				return;
 			}
-			show("Usage: /arc [status|debug|recommend|now|35%|threshold 35%|on|off|auto|manual|practical|full|window <tokens>|recent <count>]");
+			show("Usage: /arc [status|debug|check|recommend|now|35%|threshold 35%|on|off|auto|manual|practical|full|window <tokens>|recent <count>]");
 		},
 	});
 
